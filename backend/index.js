@@ -83,71 +83,170 @@ function enforceMessageSize(message) {
 }
 
 // System prompts for each client
-const SYSTEM_PROMPTS = {
-  fast: `You are a fast, lightweight AI assistant for the Brainstormer whiteboarding app. Your sole job is to classify the user's request so we can route it to the right model. Read the user's message and return a JSON object with two keys: "intent" (a short verb phrase describing what the user wants, such as "draw diagram", "modify diagram", "analyze diagram", or "chat") and "type" (one of "think", "multimodal", or "chat"). Do not include any other fields, explanations, or formatting. If the intent is unclear, set "intent" to "unknown" and "type" to "chat". Example: {"intent": "add database", "type": "think"}. Use multimodal only if the user explicitly mentions modifying the diagram based on an image or diagram analysis.`,
-  think: `You are a deep‑reasoning AI assistant helping users design systems on a whiteboard. Given the chat history, the current board summary, and the latest user request, think step‑by‑step about whether new shapes or connections should be added. Respond ONLY with a single JSON object with two keys:
-  - "reply": a concise natural‑language message explaining what you did or why no action is needed.
-  - "elements": an array of Excalidraw element skeleton objects to add.
-
-Each element object MUST conform to the Excalidraw element skeleton format. For shapes (rectangle, ellipse, diamond, etc.), always include a "text" property inside the shape object for the label. For arrows, reference the shape ids using the "start" and "end" properties, and use correct anchor coordinates for "x", "y", and "points". Do NOT use a separate label or text element for shape labels.
-
-At a minimum include:
-  - "type": one of rectangle, ellipse, diamond, circle, arrow, or line.
-  - "x" and "y": the anchor coordinates.
-  - For shapes that need a size, specify "width" and "height".
-  - For shapes, include a "text" property for the label.
-
-To connect shapes use arrow or line elements. Reference the shape ids in the arrow's "start" and "end" properties.
-
-For example:
-
-{
-  "reply": "Created architecture diagram for Dropbox with connected layers.",
-  "elements": [
-    { "id": "storage", "type": "rectangle", "x": 100, "y": 100, "width": 200, "height": 80, "text": "Storage" },
-    { "id": "access", "type": "rectangle", "x": 350, "y": 100, "width": 200, "height": 80, "text": "Access Layer" },
-    {
-      "id": "arrow1",
-      "type": "arrow",
-      "x": 200,
-      "y": 140,
-      "start": { "id": "storage" },
-      "end": { "id": "access" }
-    }
-  ]
-}
-
-If no new shapes or connections are required, return "elements": []. Do not use HTML or Markdown; always respond with raw JSON.
-
-You will be called with a description of a single step. Only add shapes needed for that step. Do not draw future components.`,
-  multimodal: `You are a multimodal AI assistant that can interpret both text and a diagram from the Brainstormer whiteboard. You will receive the chat history, a textual summary of the board, and a base64-encoded image. Analyze both modalities to understand the current diagram. If the user asks you to modify or extend the diagram, think step-by-step and respond with a JSON object containing "reply" (an explanation) and "elements" (new shapes to add). Use the same schema for each shape as described in the thinking prompt. If the user only wants analysis or feedback, return an empty "elements" array. Do not use HTML or Markdown; always respond with a JSON object.`
-  ,
-  plan: `You are a planning agent. Given a high-level system design request, respond ONLY with a JSON array of short, actionable, ordered step descriptions required to build the diagram. STRICT RULES: (1) Do NOT repeat or restate the user prompt. (2) Do NOT return an object or any explanation. (3) Do NOT include the user prompt as a step. (4) If you cannot break down the task, return an array with a single short step, not the full prompt. (5) Each entry should describe a single component or connection to draw, e.g. ["Create a user box", "Add a load balancer", "Add backend server", "Add blob storage"]. Only output a JSON array.`
-};
-
-function extractPlanSteps(planRaw, message) {
-  let planSteps;
-  try {
-    planSteps = JSON.parse(planRaw);
-    if (!Array.isArray(planSteps)) {
-      if (typeof planSteps === 'object') {
-        const values = Object.values(planSteps);
-        if (values.length === 1 && (values[0] === message || values[0].toLowerCase().includes(message.toLowerCase()))) {
-          planSteps = ["Break down the system into components and connections."];
-        } else {
-          planSteps = values;
-        }
-      } else if (typeof planSteps === 'string') {
-        if (planSteps === message || planSteps.toLowerCase().includes(message.toLowerCase())) {
-          planSteps = ["Break down the system into components and connections."];
-        } else {
-          planSteps = [planSteps];
-        }
+// Tool definitions for OpenAI function calling
+const TOOLS = {
+  classify_intent: {
+    type: "function",
+    function: {
+      name: "classify_intent",
+      description: "Classify the user's request to determine the appropriate action type",
+      parameters: {
+        type: "object",
+        properties: {
+          intent: {
+            type: "string",
+            description: "A short verb phrase describing what the user wants (e.g., 'draw diagram', 'modify diagram', 'analyze diagram', 'chat')"
+          },
+          type: {
+            type: "string",
+            enum: ["think", "multimodal", "chat"],
+            description: "The type of model to use: 'think' for diagram creation/modification, 'multimodal' for image-based analysis, 'chat' for conversation"
+          }
+        },
+        required: ["intent", "type"]
       }
     }
-    planSteps = planSteps.filter(s => typeof s === 'string' && !s.toLowerCase().includes(message.toLowerCase()));
+  },
+  add_diagram_elements: {
+    type: "function",
+    function: {
+      name: "add_diagram_elements",
+      description: "Add new shapes or connections to the whiteboard diagram",
+      parameters: {
+        type: "object",
+        properties: {
+          reply: {
+            type: "string",
+            description: "A concise natural-language message explaining what you did or why no action is needed"
+          },
+          elements: {
+            type: "array",
+            description: "Array of Excalidraw element objects to add to the diagram",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string", description: "Unique identifier for the element" },
+                type: {
+                  type: "string",
+                  enum: ["rectangle", "ellipse", "diamond", "circle", "arrow", "line"],
+                  description: "Type of element to create"
+                },
+                x: { type: "number", description: "X coordinate" },
+                y: { type: "number", description: "Y coordinate" },
+                width: { type: "number", description: "Width of the shape (not needed for arrows/lines)" },
+                height: { type: "number", description: "Height of the shape (not needed for arrows/lines)" },
+                text: { type: "string", description: "Label text for shapes" },
+                start: {
+                  type: "object",
+                  properties: { id: { type: "string" } },
+                  description: "Starting element for arrows (object with id property)"
+                },
+                end: {
+                  type: "object",
+                  properties: { id: { type: "string" } },
+                  description: "Ending element for arrows (object with id property)"
+                }
+              },
+              required: ["type"]
+            }
+          }
+        },
+        required: ["reply", "elements"]
+      }
+    }
+  },
+  create_plan: {
+    type: "function",
+    function: {
+      name: "create_plan",
+      description: "Create a step-by-step plan for building a system diagram",
+      parameters: {
+        type: "object",
+        properties: {
+          steps: {
+            type: "array",
+            description: "Ordered list of short, actionable steps to build the diagram. Each step should describe a single component or connection.",
+            items: {
+              type: "string",
+              description: "A single actionable step (e.g., 'Create a user box', 'Add load balancer', 'Connect user to load balancer')"
+            }
+          }
+        },
+        required: ["steps"]
+      }
+    }
+  }
+};
+
+// System prompts for each client
+const SYSTEM_PROMPTS = {
+  fast: `You are a fast, lightweight AI assistant for the Brainstormer whiteboarding app. Your job is to classify the user's request to determine the appropriate action type. Use the classify_intent function to return your classification. Set type to "think" for diagram-related requests, "multimodal" only if the user explicitly mentions analyzing an image or diagram, and "chat" for general conversation.`,
+  think: `You are a deep-reasoning AI assistant helping users design systems on a whiteboard. Given the chat history, current board summary, and user request, analyze what shapes or connections should be added.
+
+Use the add_diagram_elements function to return your response. Each element must conform to Excalidraw format:
+- For shapes (rectangle, ellipse, diamond, circle): include type, x, y, width, height, and text (label)
+- For arrows/lines: include type, start object with id property, and end object with id property
+- Use descriptive IDs for new elements
+
+If no changes are needed, call add_diagram_elements with an empty elements array. Only add shapes needed for the current step, not future components.`,
+  multimodal: `You are a multimodal AI assistant that interprets text and diagrams from the Brainstormer whiteboard. You receive chat history, board summary, and optionally a base64-encoded image. Use the add_diagram_elements function to respond. If the user wants analysis only, return an empty elements array. If modifications are requested, include the new shapes to add.`,
+  plan: `You are a planning agent. Given a high-level system design request, break it down into short, actionable steps. Use the create_plan function to return your plan. Each step should describe a single component or connection to draw (e.g., "Create a user box", "Add load balancer"). Do NOT repeat the user's prompt as a step. If you cannot break down the task, return a single generic step.`
+};
+function extractPlanSteps(planData, message) {
+  let planSteps;
+  try {
+    // If planData is already an object with steps property (from tool call)
+    if (typeof planData === 'object' && planData.steps && Array.isArray(planData.steps)) {
+      planSteps = planData.steps;
+    } else if (typeof planData === 'string') {
+      // Handle plain text response by converting to single step
+      const trimmed = planData.trim();
+      
+      // Try to parse as JSON first
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          planSteps = parsed;
+        } else if (parsed.steps && Array.isArray(parsed.steps)) {
+          planSteps = parsed.steps;
+        } else if (typeof parsed === 'object') {
+          const values = Object.values(parsed);
+          if (values.length === 1 && (values[0] === message || values[0].toLowerCase().includes(message.toLowerCase()))) {
+            planSteps = ["Break down the system into components and connections."];
+          } else {
+            planSteps = values;
+          }
+        }
+      } catch (jsonErr) {
+        // If JSON parsing fails, treat as plain text response
+        console.log('[PLANNING] Plain text response detected, converting to single step');
+        // Use the text as a single step if it's not the user's message
+        if (trimmed !== message && !trimmed.toLowerCase().includes(message.toLowerCase())) {
+          planSteps = [trimmed];
+        } else {
+          planSteps = ["Break down the system into components and connections."];
+        }
+      }
+    } else if (Array.isArray(planData)) {
+      planSteps = planData;
+    }
+    
+    if (!planSteps || !Array.isArray(planSteps)) {
+      planSteps = ["Break down the system into components and connections."];
+    }
+    
+    // Only filter if steps actually contain the message (avoid false positives)
+    planSteps = planSteps.filter(s => {
+      if (typeof s !== 'string') return false;
+      const stepLower = s.toLowerCase();
+      const msgLower = message.toLowerCase();
+      // Only filter if the step IS the message or contains it as the main part
+      return s !== message && !stepLower.startsWith(msgLower);
+    });
+    
     if (planSteps.length === 0) planSteps = ["Break down the system into components and connections."];
   } catch (e) {
+    console.error('[PLANNING] Error extracting plan steps:', e);
     planSteps = ["Break down the system into components and connections."];
   }
   return planSteps;
@@ -155,9 +254,10 @@ function extractPlanSteps(planRaw, message) {
 // LLM Client base class
 
 class LLMClient {
-  constructor(model, systemPrompt) {
+  constructor(model, systemPrompt, tools = null) {
     this.model = model;
     this.systemPrompt = systemPrompt;
+    this.tools = tools;
   }
   buildPayload({ message, images = [] }) {
     return {
@@ -173,37 +273,33 @@ class LLMClient {
   async sendMessage({ message, images = [] }) {
     const payload = this.buildPayload({ message, images });
     let response;
+    
     if (LLM_CONFIG.provider === 'ollama') {
       response = await axios.post(LLM_CONFIG.ollamaUrl, payload);
       return response.data.message.content;
     } else if (LLM_CONFIG.provider === 'openai') {
-      // OpenAI expects model and messages, plus API key
+      // OpenAI Chat Completions API with tool calling
       const openaiPayload = {
         model: this.model,
         messages: [
           { role: "system", content: this.systemPrompt },
           { role: "user", content: message },
         ],
-        stream: false,
         temperature: payload.options.temperature,
         top_p: payload.options.top_p
       };
-      // Use the OpenAI URL from config (should be /v1/responses for latest API)
-      const openaiResponsesUrl = LLM_CONFIG.openaiUrl;
-      const responsesPayload = {
-        model: this.model,
-        input: [
-          { role: "system", content: this.systemPrompt },
-          { role: "user", content: message }
-        ],
-        stream: false,
-        temperature: payload.options.temperature,
-        top_p: payload.options.top_p
-      };
+      
+      // Add tools if this client has them defined
+      if (this.tools && this.tools.length > 0) {
+        openaiPayload.tools = this.tools;
+        openaiPayload.tool_choice = "required"; // Force model to use tools
+        console.log(`[OpenAI] Sending request with ${this.tools.length} tool(s): ${this.tools.map(t => t.function.name).join(', ')}`);
+      }
+      
       try {
         response = await axios.post(
-          openaiResponsesUrl,
-          responsesPayload,
+          LLM_CONFIG.openaiUrl,
+          openaiPayload,
           {
             headers: {
               'Authorization': `Bearer ${LLM_CONFIG.openaiApiKey}`,
@@ -211,21 +307,29 @@ class LLMClient {
             }
           }
         );
-        // OpenAI Responses API: output is in response.data.output[0].content[0].text
-        if (
-          response.data &&
-          Array.isArray(response.data.output) &&
-          response.data.output.length > 0 &&
-          response.data.output[0].content &&
-          Array.isArray(response.data.output[0].content) &&
-          response.data.output[0].content.length > 0 &&
-          response.data.output[0].content[0].text
-        ) {
-          return response.data.output[0].content[0].text;
-        } else {
-          console.error('[OpenAI API] Unexpected response:', JSON.stringify(response.data, null, 2));
-          throw new Error('OpenAI API did not return expected output[0].content[0].text. See server logs for details.');
+        
+        // Handle OpenAI Chat Completions response
+        if (response.data && response.data.choices && response.data.choices.length > 0) {
+          const choice = response.data.choices[0];
+          const message = choice.message;
+          
+          // Check if model used tool calling
+          if (message.tool_calls && message.tool_calls.length > 0) {
+            const toolCall = message.tool_calls[0];
+            const functionArgs = JSON.parse(toolCall.function.arguments);
+            console.log(`[OpenAI] Tool called: ${toolCall.function.name}`, functionArgs);
+            return functionArgs;
+          }
+          
+          // Fallback to regular content response
+          if (message.content) {
+            console.log(`[OpenAI] Received content response (no tool call):`, message.content.substring(0, 200));
+            return message.content;
+          }
         }
+        
+        console.error('[OpenAI API] Unexpected response:', JSON.stringify(response.data, null, 2));
+        throw new Error('OpenAI API did not return expected response. See server logs for details.');
       } catch (err) {
         if (err.response) {
           console.error('[OpenAI API] Error response:', JSON.stringify(err.response.data, null, 2));
@@ -281,10 +385,14 @@ class ThinkingLLMClient extends LLMClient {
 
 class MultiModalLLMClient extends LLMClient {
   constructor() {
-    super(LLM_CONFIG.modelNames.multimodal, SYSTEM_PROMPTS.multimodal);
+    super(
+      LLM_CONFIG.modelNames.multimodal,
+      SYSTEM_PROMPTS.multimodal,
+      LLM_CONFIG.provider === 'openai' ? [TOOLS.add_diagram_elements] : null
+    );
   }
   buildPayload({ message, images = [] }) {
-    return {
+    const payload = {
       model: this.model,
       messages: [
         { role: "system", content: this.systemPrompt },
@@ -293,25 +401,37 @@ class MultiModalLLMClient extends LLMClient {
       stream: false,
       options: { temperature: 0.2, top_p: 0.4 }
     };
+    
+    return payload;
   }
 }
 
 // Factory for LLM clients
 class PlanningLLMClient extends LLMClient {
   constructor() {
-    super(LLM_CONFIG.modelNames.plan, SYSTEM_PROMPTS.plan);
+    super(
+      LLM_CONFIG.modelNames.plan,
+      SYSTEM_PROMPTS.plan,
+      LLM_CONFIG.provider === 'openai' ? [TOOLS.create_plan] : null
+    );
   }
   buildPayload({ message }) {
-    return {
+    const payload = {
       model: this.model,
       messages: [
         { role: "system", content: this.systemPrompt },
         { role: "user", content: message }
       ],
       stream: false,
-      format: "json",
       options: { temperature: 0.3, top_p: 0.4 }
     };
+    
+    // Add Ollama-specific parameters
+    if (LLM_CONFIG.provider === 'ollama') {
+      payload.format = "json";
+    }
+    
+    return payload;
   }
 }
 
@@ -331,6 +451,30 @@ function forceParseLLMJSON(input) {
   try {
     if (typeof input === "object") return input;
     let str = String(input).trim();
+    
+    // Check if it's a function call format like add_diagram_elements([...])
+    const funcMatch = str.match(/add_diagram_elements\s*\(\s*(\[[\s\S]*\])\s*\)/);
+    if (funcMatch) {
+      console.log('[PARSE] Detected function call format, extracting JSON array');
+      try {
+        const elementsArray = JSON.parse(funcMatch[1]);
+        return { reply: "Added diagram elements", elements: elementsArray };
+      } catch (funcErr) {
+        console.warn('[PARSE] Failed to parse function call arguments:', funcErr);
+      }
+    }
+    
+    // Check if it's a plain JSON array (starting with [)
+    if (str.startsWith('[')) {
+      console.log('[PARSE] Detected JSON array format');
+      try {
+        const elementsArray = JSON.parse(str);
+        return { reply: "Added diagram elements", elements: elementsArray };
+      } catch (arrErr) {
+        console.warn('[PARSE] Failed to parse JSON array:', arrErr);
+      }
+    }
+    
     // Remove leading/trailing braces and newlines
     str = str.replace(/^[\s{]+/, '{').replace(/[\s}]+$/, '}');
     // Try to extract the first JSON object in the string
@@ -352,6 +496,7 @@ function forceParseLLMJSON(input) {
 const upload = multer({ storage: multer.memoryStorage() });
 
 // Routing logic
+// Routing logic
 app.post("/api/chat", upload.single("image"), async (req, res) => {
   const { message } = req.body;
   const imageBuffer = req.file ? req.file.buffer : null;
@@ -362,12 +507,22 @@ app.post("/api/chat", upload.single("image"), async (req, res) => {
     const fastClient = LLMClientFactory.getClient("fast");
     const intentResponse = await fastClient.sendMessage({ message });
     let intent;
-    try {
-      intent = JSON.parse(intentResponse);
-    } catch (e) {
-      console.error("Raw fast model response:", intentResponse);
-      throw new Error("Failed to parse intent response from fast model");
+    
+    // Handle both tool-based (OpenAI) and JSON-based (Ollama) responses
+    if (typeof intentResponse === 'object' && intentResponse.intent && intentResponse.type) {
+      // Tool call response from OpenAI
+      intent = intentResponse;
+    } else {
+      // JSON string response from Ollama
+      try {
+        intent = JSON.parse(intentResponse);
+      } catch (e) {
+        console.error("Raw fast model response:", intentResponse);
+        throw new Error("Failed to parse intent response from fast model");
+      }
     }
+
+    console.log(`[ROUTING] Intent classified as: ${intent.intent} -> ${intent.type}`);
 
     // Step 2: Route to appropriate model (never display fast model output)
     let clientType = intent.type;
@@ -387,7 +542,6 @@ app.post("/api/chat", upload.single("image"), async (req, res) => {
     res.status(500).json({ error: error.message || "Error fetching data from LLM" });
   }
 });
-
 
 // Socket.io connection handler
 io.on("connection", (socket) => {
@@ -413,7 +567,17 @@ io.on("connection", (socket) => {
     try {
       const llmReplyRaw = await thinkClient.sendMessage(llmPayload);
       console.log(`[THINKING] Raw LLM reply:`, llmReplyRaw);
-      const llmReply = forceParseLLMJSON(llmReplyRaw);
+      
+      // Handle both tool-based (OpenAI) and JSON-based (Ollama) responses
+      let llmReply;
+      if (typeof llmReplyRaw === 'object' && llmReplyRaw.reply !== undefined && llmReplyRaw.elements !== undefined) {
+        // Tool call response from OpenAI
+        llmReply = llmReplyRaw;
+      } else {
+        // JSON string response from Ollama
+        llmReply = forceParseLLMJSON(llmReplyRaw);
+      }
+      
       console.log(`[THINKING] Parsed LLM reply:`, llmReply);
       let aiElements = planToExcalidrawElements(llmReply.elements, session.elements);
       // Fallback: if no elements, use DiagramBuilder
@@ -459,6 +623,8 @@ io.on("connection", (socket) => {
       }
       const planRaw = await planningClient.sendMessage({ message: composed });
       console.log(`[PLANNING] Raw plan response:`, planRaw);
+      
+      // Handle both tool-based (OpenAI) and JSON-based (Ollama) responses
       const planSteps = extractPlanSteps(planRaw, message);
       console.log(`[PLANNING] Parsed plan steps:`, planSteps);
       sessions[sessionId].planSteps = Array.isArray(planSteps) ? planSteps : [];
@@ -494,6 +660,8 @@ io.on("connection", (socket) => {
           }
           const planRaw = await planningClient.sendMessage({ message: composed });
           console.log(`[PLANNING] Raw plan response:`, planRaw);
+          
+          // Handle both tool-based (OpenAI) and JSON-based (Ollama) responses
           const planSteps = extractPlanSteps(planRaw, message);
           console.log(`[PLANNING] Parsed plan steps:`, planSteps);
           sessions[sessionId].planSteps = Array.isArray(planSteps) ? planSteps : [];
@@ -532,7 +700,17 @@ io.on("connection", (socket) => {
   const userMsg = enforceMessageSize(message);
   const thinkPrompt = `You are collaborating with the user on a whiteboard. Board elements JSON: ${boardJSON}. Recent chat (tail):\n${historyText}\nUser request: ${userMsg}. If the user wants purely to chat, just respond conversationally (still JSON with reply and empty elements). If the user requests changes to the diagram, return new elements ONLY for those changes.`;
       const raw = await thinkingClient.sendMessage({ message: thinkPrompt });
-      const parsed = forceParseLLMJSON(raw);
+      
+      // Handle both tool-based (OpenAI) and JSON-based (Ollama) responses
+      let parsed;
+      if (typeof raw === 'object' && raw.reply !== undefined && raw.elements !== undefined) {
+        // Tool call response from OpenAI
+        parsed = raw;
+      } else {
+        // JSON string response from Ollama
+        parsed = forceParseLLMJSON(raw);
+      }
+      
       let aiElements = [];
       if (Array.isArray(parsed.elements) && parsed.elements.length > 0) {
         aiElements = planToExcalidrawElements(parsed.elements, elements || []);
@@ -553,6 +731,6 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(port, () => {
-  console.log(`Server running (WebSocket + HTTP) on http://localhost:${port}`);
+server.listen(port, "0.0.0.0",  () => {
+  console.log(`Server running (WebSocket + HTTP) on http://0.0.0.0:${port}`);
 });

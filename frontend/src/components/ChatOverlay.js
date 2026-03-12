@@ -14,7 +14,8 @@ export default function ChatOverlay({ whiteboardRef }) {
   const textareaRef = useRef(null);
 
   useEffect(() => {
-  const s = io("http://localhost:5001", { transports: ["websocket"] });
+    const socketUrl = '/';
+    const s = io(socketUrl, { transports: ["websocket"] });
     setSocket(s);
 
     s.on("llm_stream", (partial) => {
@@ -174,24 +175,25 @@ export default function ChatOverlay({ whiteboardRef }) {
     </div>
   );
 }
+
 // Styles for the overlay and chat components
 const overlayStyle = {
   display: "flex",
   flexDirection: "column",
-  height: "100%", // Full height of the screen
+  height: "100%",
   backgroundColor: "white",
-  borderRadius: "10px",
-  boxShadow: "0px 4px 12px rgba(0, 0, 0, 0.1)",
-  zIndex: 10,
-  width: "500px", // Fixed width for the chat overlay
+  borderLeft: "1px solid #ccc",
+  boxShadow: "-4px 0 12px rgba(0, 0, 0, 0.1)",
+  overflow: "hidden",
 };
 
 const chatHistoryStyle = {
   flex: 1,
   padding: "10px",
-  overflowY: "scroll",
+  overflowY: "auto", // Change from "scroll" to "auto"
   borderBottom: "1px solid #ccc",
   whiteSpace: "pre-wrap",
+  minHeight: 0,
 };
 
 const inputContainerStyle = {

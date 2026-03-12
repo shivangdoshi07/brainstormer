@@ -7,14 +7,8 @@ services:
       dockerfile: Dockerfile
     container_name: brainstormer_backend
     restart: unless-stopped
-    environment:
-      - LLM_PROVIDER=ollama
-      - LLM_MODEL_FAST=deepseek-r1:1.5b
-      - LLM_MODEL_THINK=deepseek-r1:1.5b
-      - LLM_MODEL_MULTIMODAL=deepseek-r1:1.5b
-      - LLM_MODEL_PLAN=deepseek-r1:1.5b
-      - OLLAMA_URL=http://host.docker.internal:11434/api/chat
-      - PORT=5000
+    env_file:
+      - .env
     ports:
       - "5000:5000"
     volumes:

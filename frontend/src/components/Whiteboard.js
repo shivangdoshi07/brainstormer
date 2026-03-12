@@ -2,10 +2,19 @@ import React, { useImperativeHandle, forwardRef, useRef } from "react";
 import { Excalidraw, exportToBlob } from "@excalidraw/excalidraw";
 
 const whiteboardStyle = {
-  flex: 1,  // This allows the whiteboard to take up the remaining space
-  height: "100%", // Ensure it takes the full height of the container
-  border: "1px solid #ccc",
-  marginBottom: "20px",
+  flex: 1,
+  height: "100%",
+  width: "100%",
+  position: "relative",
+  overflow: "hidden",
+};
+
+const excalidrawWrapperStyle = {
+  position: "absolute",
+  top: 0,
+  left: 0,
+  right: 0,
+  bottom: 0,
 };
 
 const Whiteboard = forwardRef((props, ref) => {
@@ -51,15 +60,15 @@ const Whiteboard = forwardRef((props, ref) => {
         excalidrawRef.current.updateScene({ elements: merged, scrollToContent: true });
       }
     }
-
   }));
 
   return (
     <div style={whiteboardStyle}>
-      <Excalidraw ref={excalidrawRef} />
+      <div style={excalidrawWrapperStyle}>
+        <Excalidraw ref={excalidrawRef} />
+      </div>
     </div>
   );
-  
 });
 
 export default Whiteboard;
