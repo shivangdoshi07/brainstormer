@@ -28,7 +28,7 @@ const LLM_CONFIG = {
 const app = express();
 app.use(cors());
 app.use(express.json());
-const port = process.env.PORT || 5000;
+const port = process.env.PORT || 5001;
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 console.log(`[SERVER] Starting server with LLM Config: ${JSON.stringify(LLM_CONFIG)}`);
