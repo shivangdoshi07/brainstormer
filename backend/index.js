@@ -5,7 +5,6 @@ const axios = require("axios");
 const http = require("http");
 const { Server } = require("socket.io");
 const crypto = require("crypto");
-const { planToExcalidrawElements } = require("./utils");
 const DiagramBuilder = require("./diagramBuilder");
 const diagramBuilder = new DiagramBuilder();
 
@@ -111,43 +110,51 @@ const TOOLS = {
     type: "function",
     function: {
       name: "add_diagram_elements",
-      description: "Add new shapes or connections to the whiteboard diagram",
+      description: "Add new shapes or connections to the whiteboard diagram using Excalidraw element skeleton format",
       parameters: {
         type: "object",
         properties: {
           reply: {
             type: "string",
-            description: "A concise natural-language message explaining what you did or why no action is needed"
+            description: "A concise natural-language message explaining what you added or why no action is needed"
           },
           elements: {
             type: "array",
-            description: "Array of Excalidraw element objects to add to the diagram",
+            description: "Array of Excalidraw element skeletons to add. Shapes use 'label' for text. Arrows use 'start'/'end' with element IDs.",
             items: {
               type: "object",
               properties: {
-                id: { type: "string", description: "Unique identifier for the element" },
+                id: { type: "string", description: "Descriptive unique ID (e.g. 'user-box', 'load-balancer')" },
                 type: {
                   type: "string",
-                  enum: ["rectangle", "ellipse", "diamond", "circle", "arrow", "line"],
-                  description: "Type of element to create"
+                  enum: ["rectangle", "ellipse", "diamond", "arrow", "line"],
+                  description: "Element type"
                 },
-                x: { type: "number", description: "X coordinate" },
-                y: { type: "number", description: "Y coordinate" },
-                width: { type: "number", description: "Width of the shape (not needed for arrows/lines)" },
-                height: { type: "number", description: "Height of the shape (not needed for arrows/lines)" },
-                text: { type: "string", description: "Label text for shapes" },
+                x: { type: "number", description: "X coordinate (increases rightward)" },
+                y: { type: "number", description: "Y coordinate (increases downward)" },
+                width: { type: "number", description: "Width in pixels (shapes only, default 140)" },
+                height: { type: "number", description: "Height in pixels (shapes only, default 60)" },
+                label: {
+                  type: "object",
+                  description: "Text label for shapes (rectangle, ellipse, diamond)",
+                  properties: {
+                    text: { type: "string", description: "Label text" },
+                    fontSize: { type: "number", description: "Font size (default 16)" }
+                  },
+                  required: ["text"]
+                },
                 start: {
                   type: "object",
-                  properties: { id: { type: "string" } },
-                  description: "Starting element for arrows (object with id property)"
+                  properties: { id: { type: "string", description: "ID of the element this arrow starts from" } },
+                  description: "Arrow start binding — reference an element by ID"
                 },
                 end: {
                   type: "object",
-                  properties: { id: { type: "string" } },
-                  description: "Ending element for arrows (object with id property)"
+                  properties: { id: { type: "string", description: "ID of the element this arrow points to" } },
+                  description: "Arrow end binding — reference an element by ID"
                 }
               },
-              required: ["type"]
+              required: ["type", "x", "y"]
             }
           }
         },
@@ -181,15 +188,16 @@ const TOOLS = {
 // System prompts for each client
 const SYSTEM_PROMPTS = {
   fast: `You are a fast, lightweight AI assistant for the Brainstormer whiteboarding app. Your job is to classify the user's request to determine the appropriate action type. Use the classify_intent function to return your classification. Set type to "think" for diagram-related requests, "multimodal" only if the user explicitly mentions analyzing an image or diagram, and "chat" for general conversation.`,
-  think: `You are a deep-reasoning AI assistant helping users design systems on a whiteboard. Given the chat history, current board summary, and user request, analyze what shapes or connections should be added.
+  think: `You are an AI assistant helping users design diagrams on a collaborative whiteboard. Given the current board state and user request, add the appropriate shapes and connections.
 
-Use the add_diagram_elements function to return your response. Each element must conform to Excalidraw format:
-- For shapes (rectangle, ellipse, diamond, circle): include type, x, y, width, height, and text (label)
-- For arrows/lines: include type, start object with id property, and end object with id property
-- Use descriptive IDs for new elements
-
-If no changes are needed, call add_diagram_elements with an empty elements array. Only add shapes needed for the current step, not future components.`,
-  multimodal: `You are a multimodal AI assistant that interprets text and diagrams from the Brainstormer whiteboard. You receive chat history, board summary, and optionally a base64-encoded image. Use the add_diagram_elements function to respond. If the user wants analysis only, return an empty elements array. If modifications are requested, include the new shapes to add.`,
+Use the add_diagram_elements function to return your response. Use Excalidraw element skeleton format:
+- Shapes: { "type": "rectangle", "id": "user-box", "x": 100, "y": 100, "width": 140, "height": 60, "label": { "text": "User" } }
+- Arrows: { "type": "arrow", "id": "arrow-1", "x": 0, "y": 0, "start": { "id": "user-box" }, "end": { "id": "server-box" } }
+- Use descriptive IDs (e.g. "user-box", "load-balancer", "db-1"). Never reuse IDs that exist on the board.
+- Space shapes 200-250px apart horizontally. Start at x=100, y=150 unless the board already has elements.
+- For arrows, x/y can be 0 — the positions are computed automatically from the bound elements.
+- Only add elements relevant to the current step. If no diagram changes are needed, return an empty elements array.`,
+  multimodal: `You are a multimodal AI assistant for a collaborative whiteboard. You receive a board summary and optionally a diagram image. Use the add_diagram_elements function to respond using Excalidraw element skeleton format: shapes use { type, id, x, y, width, height, label: { text } }, arrows use { type, id, x, y, start: { id }, end: { id } }. If the user wants analysis only, return an empty elements array.`,
   plan: `You are a planning agent. Given a high-level system design request, break it down into short, actionable steps. Use the create_plan function to return your plan. Each step should describe a single component or connection to draw (e.g., "Create a user box", "Add load balancer"). Do NOT repeat the user's prompt as a step. If you cannot break down the task, return a single generic step.`
 };
 function extractPlanSteps(planData, message) {
@@ -285,8 +293,6 @@ class LLMClient {
           { role: "system", content: this.systemPrompt },
           { role: "user", content: message },
         ],
-        temperature: payload.options.temperature,
-        top_p: payload.options.top_p
       };
       
       // Add tools if this client has them defined
@@ -347,7 +353,11 @@ class LLMClient {
 
 class FastLLMClient extends LLMClient {
   constructor() {
-    super(LLM_CONFIG.modelNames.fast, SYSTEM_PROMPTS.fast);
+    super(
+      LLM_CONFIG.modelNames.fast,
+      SYSTEM_PROMPTS.fast,
+      LLM_CONFIG.provider === 'openai' ? [TOOLS.classify_intent] : null
+    );
   }
   buildPayload({ message }) {
     return {
@@ -366,7 +376,12 @@ class FastLLMClient extends LLMClient {
 
 class ThinkingLLMClient extends LLMClient {
   constructor() {
-    super(LLM_CONFIG.modelNames.think, SYSTEM_PROMPTS.think);
+    // Pass add_diagram_elements tool so OpenAI uses structured tool calling
+    super(
+      LLM_CONFIG.modelNames.think,
+      SYSTEM_PROMPTS.think,
+      LLM_CONFIG.provider === 'openai' ? [TOOLS.add_diagram_elements] : null
+    );
   }
   buildPayload({ message }) {
     return {
@@ -543,190 +558,145 @@ app.post("/api/chat", upload.single("image"), async (req, res) => {
   }
 });
 
-// Socket.io connection handler
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+// Parse elements from an LLM response (tool call or JSON string)
+function extractElements(raw) {
+  if (!raw) return { reply: '', elements: [] };
+  if (typeof raw === 'object' && raw.elements !== undefined) return raw;
+  const parsed = forceParseLLMJSON(raw);
+  return { reply: parsed.reply || '', elements: parsed.elements || [] };
+}
+
+// Build the context string sent to the diagram model
+function buildDiagramContext({ message, summary, chatHistory, stepDesc }) {
+  const historyText = tailChat(chatHistory || [])
+    .map(h => `${h.sender}: ${enforceMessageSize(h.text)}`)
+    .join('\n');
+  const boardCtx = summary ? `\nCurrent board: ${summary}` : '';
+  const step = stepDesc ? `\nCurrent step: ${stepDesc}` : '';
+  return `${enforceMessageSize(message)}${boardCtx}${step}\nRecent chat:\n${historyText}`;
+}
+
+// ─── Socket.io connection handler ───────────────────────────────────────────
 io.on("connection", (socket) => {
   const sessionId = socket.id;
   console.log(`[SOCKET] Client connected: ${sessionId}`);
-  // Execution phase handler: continue_step
-  socket.on("continue_step", async () => {
+  sessions[sessionId] = { chatHistory: [], summary: "" };
+
+  // ── Single unified message handler ──────────────────────────────────────
+  socket.on("message", async (payload) => {
+    const { message, elements, summary, chatHistory } = payload;
     const session = sessions[sessionId];
-    if (!session || session.planComplete) {
-      console.log(`[THINKING] No session or plan complete for sessionId: ${sessionId}`);
-      socket.emit("step_done", { reply: "Plan complete", newElements: [] });
-      return;
-    }
-    const stepDesc = session.planSteps[session.currentStep];
-    const { elements } = session;
-    const summary = JSON.stringify(elements);
-    console.log(`[THINKING] Executing step ${session.currentStep}: ${stepDesc}`);
-    const thinkClient = LLMClientFactory.getClient("think");
-    const llmPayload = {
-      message: `Current step: ${stepDesc}. Your job is to implement only this step. Current board summary: ${summary}`,
-      images: []
-    };
+    session.chatHistory = chatHistory || [];
+    session.summary = summary || '';
+
+    console.log(`[SOCKET] message from ${sessionId}: "${message.slice(0, 80)}"`);
+
     try {
-      const llmReplyRaw = await thinkClient.sendMessage(llmPayload);
-      console.log(`[THINKING] Raw LLM reply:`, llmReplyRaw);
-      
-      // Handle both tool-based (OpenAI) and JSON-based (Ollama) responses
-      let llmReply;
-      if (typeof llmReplyRaw === 'object' && llmReplyRaw.reply !== undefined && llmReplyRaw.elements !== undefined) {
-        // Tool call response from OpenAI
-        llmReply = llmReplyRaw;
+      // ── 1. Classify intent ──────────────────────────────────────────────
+      const fastClient = LLMClientFactory.getClient("fast");
+      const intentRaw = await fastClient.sendMessage({ message });
+      let intent;
+      if (typeof intentRaw === 'object' && intentRaw.type) {
+        intent = intentRaw;
       } else {
-        // JSON string response from Ollama
-        llmReply = forceParseLLMJSON(llmReplyRaw);
-      }
-      
-      console.log(`[THINKING] Parsed LLM reply:`, llmReply);
-      let aiElements = planToExcalidrawElements(llmReply.elements, session.elements);
-      // Fallback: if no elements, use DiagramBuilder
-      if (!aiElements || aiElements.length === 0) {
-        aiElements = diagramBuilder.buildElements(stepDesc, session.elements);
-        console.log(`[THINKING] Fallback DiagramBuilder elements:`, aiElements);
-      }
-      session.elements = [...session.elements, ...aiElements];
-      session.currentStep += 1;
-      if (session.currentStep >= session.planSteps.length) session.planComplete = true;
-      socket.emit("step_done", {
-        reply: llmReply.reply || "Added diagram elements.",
-        newElements: aiElements,
-        nextStepIndex: session.currentStep,
-        planComplete: session.planComplete
-      });
-    } catch (err) {
-      console.error(`[THINKING] Error during step execution:`, err);
-      socket.emit("step_done", { reply: `Error: ${err.message || "Unknown error"}`, newElements: [], nextStepIndex: session.currentStep, planComplete: session.planComplete });
-    }
-  });
-  sessions[sessionId] = {
-    chatHistory: [],
-    elements: [],
-    appState: {},
-    summary: "",
-    planSteps: [],
-    currentStep: 0,
-    planComplete: false
-  };
-  // Planning phase handler
-  socket.on("plan_request", async (payload) => {
-    try {
-      const { message } = payload;
-      console.log(`[PLANNING] Received plan_request for:`, message);
-      const planningClient = LLMClientFactory.getClient("plan");
-      const boardCtx = sessions[sessionId].elements?.length ? ` Current board JSON: ${buildBoardContext(sessions[sessionId].elements)}` : '';
-      const userMsg = enforceMessageSize(message);
-      let composed = userMsg + boardCtx;
-      // Rough guardrail if still huge
-      if (approximateTokenLength(composed) > 6000) {
-        composed = composed.slice(0, 20000) + '...';
-      }
-      const planRaw = await planningClient.sendMessage({ message: composed });
-      console.log(`[PLANNING] Raw plan response:`, planRaw);
-      
-      // Handle both tool-based (OpenAI) and JSON-based (Ollama) responses
-      const planSteps = extractPlanSteps(planRaw, message);
-      console.log(`[PLANNING] Parsed plan steps:`, planSteps);
-      sessions[sessionId].planSteps = Array.isArray(planSteps) ? planSteps : [];
-      sessions[sessionId].currentStep = 0;
-      sessions[sessionId].planComplete = false;
-      socket.emit("plan_generated", { steps: sessions[sessionId].planSteps });
-    } catch (err) {
-      console.error(`[PLANNING] Error in planning phase:`, err);
-      socket.emit("plan_generated", { error: err.message || "Unknown error" });
-    }
-  });
-
-  socket.on("user_message", async (payload) => {
-    try {
-      console.log(`[SOCKET] Received user_message from ${sessionId}`);
-      const { message, elements, appState, chatHistory, systemPrompt } = payload;
-      // Update session state
-      sessions[sessionId].chatHistory = chatHistory || [];
-      sessions[sessionId].elements = elements || [];
-      sessions[sessionId].appState = appState || {};
-      sessions[sessionId].summary = JSON.stringify(elements || []);
-
-      // If no plan exists, trigger planning phase (call planning logic directly)
-      if (!sessions[sessionId].planSteps || sessions[sessionId].planSteps.length === 0) {
-        try {
-          console.log(`[PLANNING] Received plan_request for:`, message);
-          const planningClient = LLMClientFactory.getClient("plan");
-          const boardCtx = sessions[sessionId].elements?.length ? ` Current board JSON: ${buildBoardContext(sessions[sessionId].elements)}` : '';
-          const userMsg = enforceMessageSize(message);
-          let composed = userMsg + boardCtx;
-          if (approximateTokenLength(composed) > 6000) {
-            composed = composed.slice(0, 20000) + '...';
-          }
-          const planRaw = await planningClient.sendMessage({ message: composed });
-          console.log(`[PLANNING] Raw plan response:`, planRaw);
-          
-          // Handle both tool-based (OpenAI) and JSON-based (Ollama) responses
-          const planSteps = extractPlanSteps(planRaw, message);
-          console.log(`[PLANNING] Parsed plan steps:`, planSteps);
-          sessions[sessionId].planSteps = Array.isArray(planSteps) ? planSteps : [];
-          sessions[sessionId].currentStep = 0;
-          sessions[sessionId].planComplete = false;
-          socket.emit("plan_generated", { steps: sessions[sessionId].planSteps });
-        } catch (err) {
-          console.error(`[PLANNING] Error in planning phase:`, err);
-          socket.emit("plan_generated", { error: err.message || "Unknown error" });
+        try { intent = JSON.parse(intentRaw); } catch (_) {
+          intent = { type: 'think', intent: 'draw diagram' };
         }
+      }
+      console.log(`[ROUTING] intent: ${intent.intent} → ${intent.type}`);
+
+      // ── 2a. Pure chat ────────────────────────────────────────────────────
+      if (intent.type === 'chat') {
+        const thinkClient = LLMClientFactory.getClient("think");
+        const ctx = buildDiagramContext({ message, summary: session.summary, chatHistory: session.chatHistory });
+        const raw = await thinkClient.sendMessage({ message: ctx });
+        const { reply } = extractElements(raw);
+        socket.emit("reply", { type: "chat", reply: reply || String(raw) });
         return;
       }
 
-      // Otherwise, continue with current step (or let frontend trigger continue_step)
-      socket.emit("step_ready", {
-        nextStepIndex: sessions[sessionId].currentStep,
-        planSteps: sessions[sessionId].planSteps,
-        planComplete: sessions[sessionId].planComplete
-      });
-    } catch (err) {
-      socket.emit("plan", { error: err.message || "Unknown error" });
-    }
-  });
+      // ── 2b. Diagram request — generate plan then auto-execute all steps ─
+      socket.emit("reply", { type: "progress", message: "Planning…", step: 0, total: 0 });
 
-  // Free-form chat / modification handler (no multi-step planning unless explicitly requested)
-  socket.on("chat_message", async (payload) => {
-    try {
-      const { message, elements, appState, chatHistory } = payload;
-      sessions[sessionId].chatHistory = chatHistory || [];
-      sessions[sessionId].elements = elements || [];
-      sessions[sessionId].appState = appState || {};
-  const boardJSON = buildBoardContext(elements || []);
-  const trimmedHistory = tailChat(chatHistory || []);
-  const historyText = trimmedHistory.map(h => `${h.sender}: ${enforceMessageSize(h.text)}`).join("\n");
-      const thinkingClient = LLMClientFactory.getClient("think");
-  const userMsg = enforceMessageSize(message);
-  const thinkPrompt = `You are collaborating with the user on a whiteboard. Board elements JSON: ${boardJSON}. Recent chat (tail):\n${historyText}\nUser request: ${userMsg}. If the user wants purely to chat, just respond conversationally (still JSON with reply and empty elements). If the user requests changes to the diagram, return new elements ONLY for those changes.`;
-      const raw = await thinkingClient.sendMessage({ message: thinkPrompt });
-      
-      // Handle both tool-based (OpenAI) and JSON-based (Ollama) responses
-      let parsed;
-      if (typeof raw === 'object' && raw.reply !== undefined && raw.elements !== undefined) {
-        // Tool call response from OpenAI
-        parsed = raw;
-      } else {
-        // JSON string response from Ollama
-        parsed = forceParseLLMJSON(raw);
+      const planningClient = LLMClientFactory.getClient("plan");
+      const boardCtx = summary ? ` Current board: ${summary}` : '';
+      const planRaw = await planningClient.sendMessage({
+        message: enforceMessageSize(message) + boardCtx
+      });
+      const planSteps = extractPlanSteps(planRaw, message);
+      console.log(`[PLANNING] steps:`, planSteps);
+
+      // Track accumulated element IDs so subsequent steps know what's on board
+      const drawnElementIds = new Set((elements || []).map(e => e.id).filter(Boolean));
+      let accumulatedSummary = session.summary;
+
+      for (let i = 0; i < planSteps.length; i++) {
+        const stepDesc = planSteps[i];
+        socket.emit("reply", {
+          type: "progress",
+          message: stepDesc,
+          step: i + 1,
+          total: planSteps.length,
+        });
+
+        try {
+          const thinkClient = LLMClientFactory.getClient("think");
+          const ctx = buildDiagramContext({
+            message,
+            summary: accumulatedSummary,
+            chatHistory: session.chatHistory,
+            stepDesc,
+          });
+          const raw = await thinkClient.sendMessage({ message: ctx });
+          const { reply, elements: skeletons } = extractElements(raw);
+
+          let stepElements = Array.isArray(skeletons) ? skeletons : [];
+
+          // Fallback: DiagramBuilder when LLM returns nothing
+          if (stepElements.length === 0) {
+            stepElements = diagramBuilder.buildSkeletons(stepDesc, drawnElementIds);
+            console.log(`[FALLBACK] DiagramBuilder for step: "${stepDesc}"`, stepElements);
+          }
+
+          // Track new IDs for subsequent steps
+          stepElements.forEach(el => { if (el.id) drawnElementIds.add(el.id); });
+
+          // Update running summary for next step's context
+          if (stepElements.length > 0) {
+            accumulatedSummary = (accumulatedSummary ? accumulatedSummary + '; ' : '')
+              + stepElements.map(el => `[${el.id || '?'}] ${el.type} label='${el.label?.text || ''}'`).join('; ');
+          }
+
+          socket.emit("reply", {
+            type: "elements",
+            elements: stepElements,
+            reply: reply || `Step ${i + 1}: ${stepDesc}`,
+            step: i + 1,
+            total: planSteps.length,
+          });
+        } catch (stepErr) {
+          console.error(`[STEP ${i + 1}] Error:`, stepErr);
+          socket.emit("reply", {
+            type: "progress",
+            message: `Step ${i + 1} failed: ${stepErr.message}`,
+            step: i + 1,
+            total: planSteps.length,
+          });
+        }
       }
-      
-      let aiElements = [];
-      if (Array.isArray(parsed.elements) && parsed.elements.length > 0) {
-        aiElements = planToExcalidrawElements(parsed.elements, elements || []);
-      }
-      if (aiElements.length > 0) {
-        sessions[sessionId].elements = [...sessions[sessionId].elements, ...aiElements];
-      }
-      socket.emit("chat_reply", { reply: parsed.reply || raw, newElements: aiElements });
+
+      socket.emit("reply", { type: "done", reply: "Diagram complete!" });
+
     } catch (err) {
-      console.error(`[CHAT] Error handling chat_message:`, err);
-      socket.emit("chat_reply", { reply: `Error: ${err.message || 'Unknown error'}`, newElements: [] });
+      console.error(`[SOCKET] Error handling message:`, err);
+      socket.emit("reply", { type: "error", reply: err.message || "Unknown error" });
     }
   });
 
   socket.on("disconnect", () => {
-    console.log(`[SOCKET] Client disconnected: ${socket.id}`);
+    console.log(`[SOCKET] Client disconnected: ${sessionId}`);
     delete sessions[sessionId];
   });
 });
