@@ -48,7 +48,7 @@ function shapeTypeForLabel(label) {
 class DiagramBuilder {
   constructor() {
     this.xStart = 100;
-    this.yBase = 150;
+    this.yBase = 200;
     this.xStep = 240;
   }
 
@@ -66,15 +66,28 @@ class DiagramBuilder {
   }
 
   _buildShapeSkeleton(lower, drawnElementIds) {
-    // Extract label from step description
+    // Strip common plan-step prefixes so "add a recommendation engine"
+    // becomes "recommendation engine", not "add a recommendation".
+    const stripped = lower
+      .replace(/^(add|create|draw|place|include|implement|build|design|introduce|set up|set)\s+(a|an|the)\s+/i, "")
+      .replace(/^(add|create|draw|place|include|implement|build|design|introduce|set up|set)\s+/i, "")
+      .trim();
+
     let label = null;
     for (const k of KNOWN_LABELS) {
-      if (lower.includes(k)) {
+      if (stripped.includes(k)) {
         label = normalizePrimaryLabel(k);
         break;
       }
     }
-    if (!label) label = lower.split(/\s+/).slice(0, 3).join(" ");
+    // Generic fallback: title-case the stripped description (up to 4 words)
+    if (!label) {
+      label = stripped
+        .split(/\s+/)
+        .slice(0, 4)
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(" ");
+    }
 
     const id = label.toLowerCase().replace(/\s+/g, "-");
 
@@ -82,6 +95,10 @@ class DiagramBuilder {
     if (drawnElementIds.has(id)) return [];
 
     const shapeType = shapeTypeForLabel(label);
+    const width = label.length > 18 ? 240 : label.length > 10 ? 200 : 160;
+    // Place to the right of however many shapes are already drawn, at a fixed y.
+    // The fallback doesn't have positional context, so it uses a simple row layout.
+    // The LLM prompt handles intelligent 2D placement; this only fires when the LLM returns nothing.
     const x = this.xStart + drawnElementIds.size * this.xStep;
     const y = this.yBase;
 
@@ -91,7 +108,7 @@ class DiagramBuilder {
         id,
         x,
         y,
-        width: 140,
+        width,
         height: 60,
         label: { text: label },
       },

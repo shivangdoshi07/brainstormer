@@ -94,12 +94,12 @@ const TOOLS = {
         properties: {
           intent: {
             type: "string",
-            description: "A short verb phrase describing what the user wants (e.g., 'draw diagram', 'modify diagram', 'analyze diagram', 'chat')"
+            description: "A short verb phrase describing what the user wants (e.g., 'draw diagram', 'modify diagram', 'explain concept', 'chat')"
           },
           type: {
             type: "string",
             enum: ["think", "multimodal", "chat"],
-            description: "The type of model to use: 'think' for diagram creation/modification, 'multimodal' for image-based analysis, 'chat' for conversation"
+            description: "The type of model to use: 'think' for any diagram creation, modification, or visual explanation — 'multimodal' only if user explicitly asks to analyze an uploaded image — 'chat' for pure conversation with no visual component"
           }
         },
         required: ["intent", "type"]
@@ -110,30 +110,30 @@ const TOOLS = {
     type: "function",
     function: {
       name: "add_diagram_elements",
-      description: "Add new shapes or connections to the whiteboard diagram using Excalidraw element skeleton format",
+      description: "Add shapes, connections, and free-floating text to the whiteboard. Diagrams should ARGUE visually — the structure itself should communicate relationships and flow, not just label boxes.",
       parameters: {
         type: "object",
         properties: {
           reply: {
             type: "string",
-            description: "A concise natural-language message explaining what you added or why no action is needed"
+            description: "A friendly, collaborative message explaining the design choices you made — be conversational, like a teammate thinking out loud. Mention why you chose the layout or shapes, and invite feedback."
           },
           elements: {
             type: "array",
-            description: "Array of Excalidraw element skeletons to add. Shapes use 'label' for text. Arrows use 'start'/'end' with element IDs.",
+            description: "Array of Excalidraw element skeletons. Mix shapes, free-floating text, and arrows to create visual arguments, not just box grids.",
             items: {
               type: "object",
               properties: {
-                id: { type: "string", description: "Descriptive unique ID (e.g. 'user-box', 'load-balancer')" },
+                id: { type: "string", description: "Descriptive unique ID (e.g. 'user-actor', 'api-gateway', 'postgres-db')" },
                 type: {
                   type: "string",
-                  enum: ["rectangle", "ellipse", "diamond", "arrow", "line"],
-                  description: "Element type"
+                  enum: ["rectangle", "ellipse", "diamond", "arrow", "line", "text"],
+                  description: "Shape type with semantic meaning: ellipse=actors/users/endpoints, rectangle=services/processes/components, diamond=decisions/routers/gateways, text=free-floating labels/section titles/annotations (no container needed), arrow=directed flow/relationship, line=structural dividers/timelines"
                 },
                 x: { type: "number", description: "X coordinate (increases rightward)" },
                 y: { type: "number", description: "Y coordinate (increases downward)" },
-                width: { type: "number", description: "Width in pixels (shapes only, default 140)" },
-                height: { type: "number", description: "Height in pixels (shapes only, default 60)" },
+                width: { type: "number", description: "Width in pixels (shapes only)" },
+                height: { type: "number", description: "Height in pixels (shapes only)" },
                 label: {
                   type: "object",
                   description: "Text label for shapes (rectangle, ellipse, diamond)",
@@ -143,6 +143,18 @@ const TOOLS = {
                   },
                   required: ["text"]
                 },
+                text: { type: "string", description: "Text content for free-floating text elements (type='text' only)" },
+                fontSize: { type: "number", description: "Font size for text elements (default 18 for section titles, 14 for annotations)" },
+                strokeColor: {
+                  type: "string",
+                  description: "Border/stroke color (hex). Semantic palette: users/actors=#2563eb, services/backends=#16a34a, databases/storage=#9333ea, gateways/LB/CDN=#ea580c, queues/events=#ca8a04, external/3rd-party=#64748b"
+                },
+                backgroundColor: {
+                  type: "string",
+                  description: "Fill color (hex). Semantic palette: users/actors=#dbeafe, services/backends=#dcfce7, databases/storage=#f3e8ff, gateways/LB/CDN=#ffedd5, queues/events=#fef9c3, external/3rd-party=#f1f5f9"
+                },
+                roughness: { type: "number", description: "0=clean crisp lines (default), 1=hand-drawn feel" },
+                strokeWidth: { type: "number", description: "Line thickness: 1=thin/subtle, 2=standard (default for shapes), 1.5=arrows" },
                 start: {
                   type: "object",
                   properties: { id: { type: "string", description: "ID of the element this arrow starts from" } },
@@ -166,20 +178,25 @@ const TOOLS = {
     type: "function",
     function: {
       name: "create_plan",
-      description: "Create a step-by-step plan for building a system diagram",
+      description: "Plan what to draw on the whiteboard, including the layout pattern and each component's semantic role",
       parameters: {
         type: "object",
         properties: {
+          diagram_type: {
+            type: "string",
+            enum: ["hierarchical", "pipeline", "fan-out", "convergence", "cycle", "side-by-side", "timeline"],
+            description: "The visual layout pattern that best fits this concept. hierarchical=layered system architecture, pipeline=sequential data/process flow, fan-out=one source to many consumers, convergence=many inputs to one output, cycle=feedback loop or iterative process, side-by-side=comparison or before/after, timeline=event sequence or lifecycle"
+          },
           steps: {
             type: "array",
-            description: "Ordered list of short, actionable steps to build the diagram. Each step should describe a single component or connection.",
+            description: "Components and connections to draw. Tag each with its semantic role in brackets so the diagram AI picks the right shape and color.",
             items: {
               type: "string",
-              description: "A single actionable step (e.g., 'Create a user box', 'Add load balancer', 'Connect user to load balancer')"
+              description: "Component or connection description with role tag. Examples: 'User [actor] - initiates requests', 'API Gateway [gateway] - routes traffic', 'Auth Service [service] - validates tokens', 'PostgreSQL [storage] - persists user data', 'Connect User to API Gateway'"
             }
           }
         },
-        required: ["steps"]
+        required: ["diagram_type", "steps"]
       }
     }
   }
@@ -187,29 +204,105 @@ const TOOLS = {
 
 // System prompts for each client
 const SYSTEM_PROMPTS = {
-  fast: `You are a fast, lightweight AI assistant for the Brainstormer whiteboarding app. Your job is to classify the user's request to determine the appropriate action type. Use the classify_intent function to return your classification. Set type to "think" for diagram-related requests, "multimodal" only if the user explicitly mentions analyzing an image or diagram, and "chat" for general conversation.`,
-  think: `You are an AI assistant helping users design diagrams on a collaborative whiteboard. Given the current board state and user request, add the appropriate shapes and connections.
+  fast: `You are a fast intent classifier for the Brainstormer whiteboarding app. Use classify_intent to categorize the user's request.
 
-Use the add_diagram_elements function. Use Excalidraw element skeleton format:
-- Shapes: { "type": "rectangle", "id": "user-box", "x": 100, "y": 150, "width": 140, "height": 60, "label": { "text": "User" } }
-- Arrows: { "type": "arrow", "id": "arrow-1", "x": 0, "y": 0, "start": { "id": "user-box" }, "end": { "id": "server-box" } }
+Set type to:
+- "think" for anything visual: creating diagrams, modifying diagrams, explaining concepts visually, brainstorming with a diagram, adding/removing/editing elements
+- "multimodal" ONLY if the user explicitly says to analyze an uploaded image or screenshot
+- "chat" ONLY for pure conversation with no visual component (e.g., "what is a load balancer?", "thanks", "can you explain X?")
 
-Layout rules (CRITICAL — violations cause overlapping elements):
-- Use descriptive IDs (e.g. "user-box", "load-balancer", "db-1"). Never reuse an ID already on the board.
-- Default shape size: width=140, height=60. Place shapes at y=150.
-- Space shapes 240px apart horizontally: x=100, 340, 580, 820, …
-- If the board already has elements, read their positions from the board summary and place NEW elements to the RIGHT of the rightmost existing shape (rightmost x + width + 240).
-- Never place two shapes at the same x,y.
-- For arrows: set x=0, y=0 — positions are auto-computed from the bound element IDs.
-- For arrows referencing existing board elements, use their exact IDs from the board summary.
-- Only add elements for the current step. Return an empty array if no diagram changes are needed.`,
-  multimodal: `You are a multimodal AI assistant for a collaborative whiteboard. You receive a board summary and optionally a diagram image. Use the add_diagram_elements function to respond using Excalidraw element skeleton format: shapes use { type, id, x, y, width, height, label: { text } }, arrows use { type, id, x, y, start: { id }, end: { id } }. If the user wants analysis only, return an empty elements array.`,
-  plan: `You are a planning agent. Given a high-level system design request, break it down into short, actionable steps. Use the create_plan function to return your plan. Each step should describe a single component or connection to draw (e.g., "Create a user box", "Add load balancer"). Do NOT repeat the user's prompt as a step. If you cannot break down the task, return a single generic step.`
+When in doubt between "think" and "chat", choose "think" — it's better to draw too much than too little.`,
+
+  think: `You are a visual thinker and collaborative design partner on a shared whiteboard. Your job is to draw diagrams that ARGUE — the visual structure itself should communicate relationships, causality, and flow that words alone can't express.
+
+STEP 1 — CHOOSE A VISUAL PATTERN that mirrors the concept:
+  • HIERARCHICAL: Layered top-to-bottom (actors → gateways → services → storage). Best for system architectures, infrastructure.
+  • PIPELINE: Left-to-right row of steps. Best for data flows, ETL, CI/CD, sequential processes.
+  • FAN-OUT: Central hub radiating arrows outward. Best for APIs serving many consumers, event sources, pub/sub.
+  • CONVERGENCE: Multiple inputs merging into one output. Best for aggregation, search indexing, funnels.
+  • CYCLE: Elements in a loop with a return arrow. Best for request-response, feedback loops, iterative processes.
+  • SIDE-BY-SIDE: Two parallel groups. Best for before/after, client vs server, comparisons, alternatives.
+  • TIMELINE: Horizontal line with dots and labels. Best for event sequences, lifecycle phases, steps over time.
+
+STEP 2 — ASSIGN SHAPES WITH SEMANTIC MEANING (the shape should BE the meaning):
+  • ellipse → actors, users, external systems, start/end points
+  • rectangle → services, backends, components, processes, actions
+  • diamond → decisions, routers, load balancers, API gateways, conditions
+  • text (no container) → section titles, layer labels, annotations, descriptions — use freely, default to text instead of a box when no arrow connects to it
+
+STEP 3 — APPLY SEMANTIC COLORS (encode role with color, not decoration):
+  • Users / Clients / Actors:        backgroundColor="#dbeafe"  strokeColor="#2563eb"
+  • Services / Backends / APIs:      backgroundColor="#dcfce7"  strokeColor="#16a34a"
+  • Databases / Storage / Caches:    backgroundColor="#f3e8ff"  strokeColor="#9333ea"
+  • Gateways / Load Balancers / CDN: backgroundColor="#ffedd5"  strokeColor="#ea580c"
+  • Queues / Events / Async:         backgroundColor="#fef9c3"  strokeColor="#ca8a04"
+  • External / Third-party:          backgroundColor="#f1f5f9"  strokeColor="#64748b"
+
+STEP 4 — LAYOUT COORDINATES by pattern:
+  Hierarchical: y=100 (actors), y=270 (gateways/CDN/LB), y=440 (services), y=610 (databases/queues). x=100 + index*(width+80) per tier.
+  Pipeline:     y=260, x=100 + index*(width+80).
+  Fan-out:      Center at (460, 260). Targets spread at x=700, y staggered by 140px starting at y=100.
+  Convergence:  Sources at x=100, y staggered. Output at x=500, y=260.
+  Cycle:        3 nodes: (200,160) (500,160) (350,380). 4 nodes: corners of a 400x280 rectangle starting at (100,100).
+  Side-by-side: Left group x=80–380, right group x=520–820. Add a vertical divider line at x=460.
+  Timeline:     Horizontal line (type="line") at y=300 from x=80 to x=max. Dot (ellipse 14×14) every 220px. Label (text) at y=250 above each dot.
+
+STEP 5 — ADD FREE-FLOATING TEXT for context:
+  • Add section/layer labels as text elements (type="text", fontSize=15, no shape around them)
+  • Example: { "type": "text", "id": "label-frontend", "x": 40, "y": 75, "text": "Frontend", "fontSize": 15 }
+
+STEP 6 — SIZE shapes by label length:
+  ≤10 chars → width=160, 11-18 chars → width=200, >18 chars → width=240. height=60 for all shapes.
+
+STEP 7 — ADD ARROWS after all shapes. x=0, y=0 always for arrows. roughness=0, strokeWidth=1.5.
+
+CONTAINER DISCIPLINE — not every piece of text needs a shape. Ask: "does an arrow connect to this?" If no, use type="text" instead of a box. Aim for visual variety, not a uniform grid of rectangles.
+
+QUALITY CHECK before returning:
+  - Does the visual structure alone communicate the concept? (remove text mentally — does it still make sense?)
+  - Are section labels present to orient the viewer?
+  - Are colors consistent with semantic roles?
+  - Is there visual variety (mix of shapes, text, arrows)?
+
+RULES:
+  - roughness=0 and strokeWidth=2 for all shapes (clean, professional look)
+  - IDs: descriptive and unique (e.g. "api-gateway", "user-actor", "postgres-db")
+  - Never reuse an ID from EXISTING BOARD ELEMENTS
+  - If board has elements: read their positions to extend layout consistently
+  - Return ALL elements (shapes, text labels, arrows) in one array
+  - Return empty elements array only if the user is chatting with no diagram request
+  - In your reply: be a collaborative design partner — explain your layout choices briefly and invite feedback`,
+
+  multimodal: `You are a visual design partner on a collaborative whiteboard. You receive a board summary and optionally a diagram image. Use add_diagram_elements to respond. Apply shape semantics (ellipse=actors, diamond=decisions/gateways, rectangle=services), semantic colors (users=#dbeafe/#2563eb, services=#dcfce7/#16a34a, databases=#f3e8ff/#9333ea), and use free-floating text (type="text") for labels that don't need arrows. If the user wants analysis only, return empty elements and explain in reply.`,
+
+  plan: `You are a visual planning agent for a collaborative whiteboard. Given a user's request, plan what to draw.
+
+FIRST: Identify the best visual pattern (diagram_type):
+  - hierarchical: layered system (actors → gateways → services → storage)
+  - pipeline: sequential left-to-right flow (data pipelines, ETL, CI/CD)
+  - fan-out: one source distributing to many consumers (pub/sub, APIs)
+  - convergence: many inputs merging into one output (aggregation, indexing)
+  - cycle: loop or feedback pattern (request-response, iterative)
+  - side-by-side: two parallel groups (comparison, client vs server)
+  - timeline: event sequence or lifecycle (user journey, deployment steps)
+
+THEN: List each component as a short step tagged with its semantic role:
+  - [actor] for users, clients, browsers, mobile apps
+  - [gateway] for load balancers, API gateways, CDNs, reverse proxies
+  - [service] for backend services, APIs, workers, processors
+  - [storage] for databases, caches, queues, blob stores, file systems
+  - [external] for third-party services, SaaS, external APIs
+
+Format: "ComponentName [role] - one-line description"
+Then add connection steps: "Connect ComponentA to ComponentB"
+
+Do NOT repeat the user's request verbatim as a step. If the task is simple, return a minimal but complete plan.`
 };
 function extractPlanSteps(planData, message) {
   let planSteps;
   try {
     // If planData is already an object with steps property (from tool call)
+    // Also capture diagram_type if present
     if (typeof planData === 'object' && planData.steps && Array.isArray(planData.steps)) {
       planSteps = planData.steps;
     } else if (typeof planData === 'string') {
@@ -577,17 +670,22 @@ function extractElements(raw) {
 // Build the context string sent to the diagram model.
 // Board summary comes first and is called out clearly so the LLM reads it
 // before deciding where to place elements.
-function buildDiagramContext({ message, summary, chatHistory, stepDesc }) {
+function buildDiagramContext({ message, summary, chatHistory, allSteps, diagramType }) {
   const historyText = tailChat(chatHistory || [])
     .map(h => `${h.sender}: ${enforceMessageSize(h.text)}`)
     .join('\n');
   const boardCtx = summary
-    ? `\nEXISTING BOARD ELEMENTS (use their IDs for arrow bindings and read their x positions to avoid overlaps):\n${summary}`
-    : '\nBoard is empty — start shapes at x=100, y=150.';
-  const step = stepDesc ? `\nCURRENT STEP: ${stepDesc}` : '';
+    ? `\nEXISTING BOARD ELEMENTS (format: [id] type (x,y) WxH label='...' — read positions to extend layout correctly):\n${summary}`
+    : '\nBoard is empty — place first shape at x=100, y=260.';
+  const layoutHint = diagramType
+    ? `\nSUGGESTED LAYOUT PATTERN: ${diagramType} — use this pattern unless the components clearly call for a different one.`
+    : '';
+  const components = allSteps?.length
+    ? `\nCOMPONENTS TO ADD (each tagged with semantic role — use role to assign shape type and color):\n${allSteps.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
+    : '';
   const userReq = `\nUSER REQUEST: ${enforceMessageSize(message)}`;
   const history = historyText ? `\nRecent chat:\n${historyText}` : '';
-  return `${boardCtx}${step}${userReq}${history}`;
+  return `${boardCtx}${layoutHint}${components}${userReq}${history}`;
 }
 
 // ─── Socket.io connection handler ───────────────────────────────────────────
@@ -629,8 +727,11 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // ── 2b. Diagram request — generate plan then auto-execute all steps ─
-      socket.emit("reply", { type: "progress", message: "Planning…", step: 0, total: 0 });
+      // ── 2b. Diagram request — plan then draw entire diagram in one LLM call ─
+      // Planning and drawing are kept as two separate steps so the diagram LLM
+      // sees ALL components at once and can make globally-optimal layout decisions.
+
+      socket.emit("reply", { type: "progress", message: "Planning…", step: 1, total: 2 });
 
       const planningClient = LLMClientFactory.getClient("plan");
       const boardCtx = summary ? ` Current board: ${summary}` : '';
@@ -638,71 +739,46 @@ io.on("connection", (socket) => {
         message: enforceMessageSize(message) + boardCtx
       });
       const planSteps = extractPlanSteps(planRaw, message);
-      console.log(`[PLANNING] steps:`, planSteps);
+      // Extract diagram_type from the raw plan response if available
+      const diagramType = (typeof planRaw === 'object' && planRaw.diagram_type) ? planRaw.diagram_type : null;
+      console.log(`[PLANNING] diagram_type: ${diagramType}, steps:`, planSteps);
 
-      // Track accumulated element IDs so subsequent steps know what's on board
-      const drawnElementIds = new Set((elements || []).map(e => e.id).filter(Boolean));
-      let accumulatedSummary = session.summary;
+      socket.emit("reply", { type: "progress", message: "Drawing diagram…", step: 2, total: 2 });
 
-      for (let i = 0; i < planSteps.length; i++) {
-        const stepDesc = planSteps[i];
-        socket.emit("reply", {
-          type: "progress",
-          message: stepDesc,
-          step: i + 1,
-          total: planSteps.length,
-        });
+      // Single diagram LLM call with ALL steps — enables globally-optimal layout
+      const thinkClient = LLMClientFactory.getClient("think");
+      const ctx = buildDiagramContext({
+        message,
+        summary: session.summary,
+        chatHistory: session.chatHistory,
+        allSteps: planSteps,
+        diagramType,
+      });
+      const raw = await thinkClient.sendMessage({ message: ctx });
+      const { reply, elements: skeletons } = extractElements(raw);
 
-        try {
-          const thinkClient = LLMClientFactory.getClient("think");
-          const ctx = buildDiagramContext({
-            message,
-            summary: accumulatedSummary,
-            chatHistory: session.chatHistory,
-            stepDesc,
-          });
-          const raw = await thinkClient.sendMessage({ message: ctx });
-          const { reply, elements: skeletons } = extractElements(raw);
+      let allElements = Array.isArray(skeletons) ? skeletons : [];
 
-          let stepElements = Array.isArray(skeletons) ? skeletons : [];
-
-          // Fallback: DiagramBuilder when LLM returns nothing
-          if (stepElements.length === 0) {
-            stepElements = diagramBuilder.buildSkeletons(stepDesc, drawnElementIds);
-            console.log(`[FALLBACK] DiagramBuilder for step: "${stepDesc}"`, stepElements);
-          }
-
-          // Track new IDs for subsequent steps
-          stepElements.forEach(el => { if (el.id) drawnElementIds.add(el.id); });
-
-          // Update running summary for next step's context — include positions
-          // so the LLM knows where to place subsequent elements without overlapping.
-          if (stepElements.length > 0) {
-            const newEntries = stepElements
-              .filter(el => el.type !== 'arrow')
-              .map(el => `[${el.id || '?'}] ${el.type} at (${el.x ?? 0},${el.y ?? 0}) size ${el.width || 140}x${el.height || 60} label='${el.label?.text || ''}'`);
-            accumulatedSummary = [accumulatedSummary, ...newEntries].filter(Boolean).join('; ');
-          }
-
-          socket.emit("reply", {
-            type: "elements",
-            elements: stepElements,
-            reply: reply || `Step ${i + 1}: ${stepDesc}`,
-            step: i + 1,
-            total: planSteps.length,
-          });
-        } catch (stepErr) {
-          console.error(`[STEP ${i + 1}] Error:`, stepErr);
-          socket.emit("reply", {
-            type: "progress",
-            message: `Step ${i + 1} failed: ${stepErr.message}`,
-            step: i + 1,
-            total: planSteps.length,
-          });
+      // Fallback: DiagramBuilder for each step when LLM returns nothing
+      if (allElements.length === 0) {
+        const drawnIds = new Set((elements || []).map(e => e.id).filter(Boolean));
+        for (const stepDesc of planSteps) {
+          const fallback = diagramBuilder.buildSkeletons(stepDesc, drawnIds);
+          fallback.forEach(el => { if (el.id) drawnIds.add(el.id); });
+          allElements.push(...fallback);
         }
+        console.log(`[FALLBACK] DiagramBuilder produced ${allElements.length} elements`);
       }
 
-      socket.emit("reply", { type: "done", reply: "Diagram complete!" });
+      socket.emit("reply", {
+        type: "elements",
+        elements: allElements,
+        reply: reply || "Here's your diagram! Let me know if you'd like to adjust anything.",
+        step: 2,
+        total: 2,
+      });
+
+      socket.emit("reply", { type: "done", reply: "" });
 
     } catch (err) {
       console.error(`[SOCKET] Error handling message:`, err);

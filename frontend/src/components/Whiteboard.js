@@ -1,6 +1,27 @@
 import React, { useImperativeHandle, forwardRef, useState } from "react";
 import { Excalidraw, exportToBlob, convertToExcalidrawElements } from "@excalidraw/excalidraw";
 
+/**
+ * Returns the point where the line from (cx, cy) toward (tx, ty) exits the
+ * bounding box of an element centered at (cx, cy) with given width and height.
+ * Used to start/end arrows at the edge of shapes instead of their centers.
+ */
+function getBoxEdgePoint(cx, cy, width, height, tx, ty) {
+  const dx = tx - cx;
+  const dy = ty - cy;
+  if (dx === 0 && dy === 0) return { x: cx, y: cy };
+
+  const halfW = (width  || 0) / 2;
+  const halfH = (height || 0) / 2;
+
+  // Scale factor so the point lands exactly on the box boundary
+  const scaleX = halfW / (Math.abs(dx) || 1);
+  const scaleY = halfH / (Math.abs(dy) || 1);
+  const scale  = Math.min(scaleX, scaleY);
+
+  return { x: cx + dx * scale, y: cy + dy * scale };
+}
+
 const Whiteboard = forwardRef((props, ref) => {
   const [excalidrawAPI, setExcalidrawAPI] = useState(null);
 
@@ -33,8 +54,16 @@ const Whiteboard = forwardRef((props, ref) => {
         }
 
         return els
-          .filter((el) => el.type !== "text") // bound text is captured via textByContainer
+          .filter((el) => {
+            // Include all non-text elements, plus free-floating text (no containerId)
+            if (el.type !== "text") return true;
+            return !el.containerId; // free-floating text labels
+          })
           .map((el) => {
+            if (el.type === "text") {
+              const text = (el.text || el.originalText || "").slice(0, 60);
+              return `[${el.id}] text (${Math.round(el.x)},${Math.round(el.y)}) label='${text}'`;
+            }
             const labelText = textByContainer[el.id] || el.text || "";
             const label = labelText ? ` label='${labelText}'` : "";
             return `[${el.id}] ${el.type} (${Math.round(el.x)},${Math.round(el.y)}) ${Math.round(el.width || 0)}x${Math.round(el.height || 0)}${label}`;
@@ -86,7 +115,6 @@ const Whiteboard = forwardRef((props, ref) => {
           const endEl = skel.end?.id ? allById[skel.end.id] : null;
 
           if (!startEl || !endEl) {
-            // Can't resolve both endpoints — skip this arrow and warn
             console.warn(
               `[Whiteboard] Arrow "${skel.id}" skipped: could not resolve` +
               ` start="${skel.start?.id}" end="${skel.end?.id}"`
@@ -94,19 +122,33 @@ const Whiteboard = forwardRef((props, ref) => {
             continue;
           }
 
-          // Compute center-to-center geometry
-          const sx = startEl.x + (startEl.width || 0) / 2;
-          const sy = startEl.y + (startEl.height || 0) / 2;
-          const ex = endEl.x + (endEl.width || 0) / 2;
-          const ey = endEl.y + (endEl.height || 0) / 2;
+          // Compute center points
+          const scx = startEl.x + (startEl.width || 0) / 2;
+          const scy = startEl.y + (startEl.height || 0) / 2;
+          const ecx = endEl.x + (endEl.width || 0) / 2;
+          const ecy = endEl.y + (endEl.height || 0) / 2;
 
-          // Use convertToExcalidrawElements to fill in all required fields,
-          // then immediately override the geometry with our computed values.
+          // Find where the line from start-center toward end-center exits the
+          // start element's bounding box, and vice versa for the end element.
+          const startEdge = getBoxEdgePoint(scx, scy, startEl.width || 0, startEl.height || 0, ecx, ecy);
+          const endEdge   = getBoxEdgePoint(ecx, ecy, endEl.width   || 0, endEl.height   || 0, scx, scy);
+
+          // Add an 8px gap so the arrowhead doesn't sit flush against the shape
+          const dist = Math.hypot(ecx - scx, ecy - scy) || 1;
+          const gapX = ((ecx - scx) / dist) * 8;
+          const gapY = ((ecy - scy) / dist) * 8;
+
+          const ax = startEdge.x + gapX;
+          const ay = startEdge.y + gapY;
+          const bx = endEdge.x   - gapX;
+          const by = endEdge.y   - gapY;
+
+          // Use convertToExcalidrawElements to fill in all required Excalidraw fields,
+          // then override geometry with our edge-to-edge coordinates.
           let arrowEl = null;
           try {
-            // Pass a minimal skeleton — no start/end IDs to avoid cross-ref issues
             const [base] = convertToExcalidrawElements(
-              [{ type: "arrow", id: skel.id, x: sx, y: sy }],
+              [{ type: "arrow", id: skel.id, x: ax, y: ay }],
               { regenerateIds: false }
             );
             arrowEl = base;
@@ -115,14 +157,14 @@ const Whiteboard = forwardRef((props, ref) => {
             continue;
           }
 
-          // Set correct geometry and bindings
-          arrowEl.x = sx;
-          arrowEl.y = sy;
-          arrowEl.points = [[0, 0], [ex - sx, ey - sy]];
-          arrowEl.width = Math.abs(ex - sx);
-          arrowEl.height = Math.abs(ey - sy);
-          arrowEl.startBinding = { elementId: startEl.id, focus: 0, gap: 1 };
-          arrowEl.endBinding = { elementId: endEl.id, focus: 0, gap: 1 };
+          arrowEl.x = ax;
+          arrowEl.y = ay;
+          arrowEl.points = [[0, 0], [bx - ax, by - ay]];
+          arrowEl.width  = Math.abs(bx - ax);
+          arrowEl.height = Math.abs(by - ay);
+          // Bindings keep arrows attached when shapes are moved interactively
+          arrowEl.startBinding = { elementId: startEl.id, focus: 0, gap: 8 };
+          arrowEl.endBinding   = { elementId: endEl.id,   focus: 0, gap: 8 };
 
           convertedArrows.push(arrowEl);
         }
