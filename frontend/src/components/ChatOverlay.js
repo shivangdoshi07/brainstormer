@@ -1,6 +1,33 @@
 import React, { useState, useEffect, useRef } from "react";
 import { io } from "socket.io-client";
 
+// Inject keyframe animation once
+const STYLE_ID = "brainstormer-dot-anim";
+if (!document.getElementById(STYLE_ID)) {
+  const style = document.createElement("style");
+  style.id = STYLE_ID;
+  style.textContent = `
+    @keyframes bm-bounce {
+      0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
+      40%            { transform: translateY(-5px); opacity: 1; }
+    }
+    .bm-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: #94a3b8;
+      display: inline-block;
+      animation: bm-bounce 1.2s ease-in-out infinite;
+    }
+    .bm-dot:nth-child(1) { animation-delay: 0s; }
+    .bm-dot:nth-child(2) { animation-delay: 0.2s; }
+    .bm-dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes bm-progress {
+      from { background-position: 0 0; }
+      to   { background-position: 40px 0; }
+    }
+  `;
+  document.head.appendChild(style);
+}
+
 export default function ChatOverlay({ whiteboardRef }) {
   const [message, setMessage] = useState("");
   const [chatHistory, setChatHistory] = useState([]);
@@ -159,33 +186,34 @@ export default function ChatOverlay({ whiteboardRef }) {
           </div>
         ))}
 
-        {/* Progress indicator */}
-        {loading && progress && (
-          <div style={styles.progressWrap}>
-            <div style={styles.progressBar}>
-              <div
-                style={{
-                  ...styles.progressFill,
-                  width:
-                    progress.total > 0
-                      ? `${Math.round((progress.step / progress.total) * 100)}%`
-                      : "100%",
-                }}
-              />
-            </div>
-            <div style={styles.progressLabel}>
-              {progress.total > 0
-                ? `${progress.message} (${progress.step}/${progress.total})`
-                : progress.message}
-            </div>
-          </div>
-        )}
-        {loading && !progress && (
-          <div style={styles.progressWrap}>
-            <div style={styles.thinkingDots}>
-              <span />
-              <span />
-              <span />
+        {/* Inline status bubble — visible from the moment the user sends */}
+        {loading && (
+          <div style={styles.botBubble}>
+            <div style={styles.bubbleLabel}>Assistant</div>
+            <div style={styles.statusBubble}>
+              <div style={styles.statusTop}>
+                <span className="bm-dot" />
+                <span className="bm-dot" />
+                <span className="bm-dot" />
+                <span style={styles.statusText}>
+                  {progress ? progress.message : "Thinking…"}
+                </span>
+              </div>
+              {progress && progress.total > 0 && (
+                <div style={styles.statusBar}>
+                  <div
+                    style={{
+                      ...styles.statusFill,
+                      width: `${Math.round((progress.step / progress.total) * 100)}%`,
+                    }}
+                  />
+                </div>
+              )}
+              {progress && progress.total > 0 && (
+                <div style={styles.statusStep}>
+                  Step {progress.step} of {progress.total}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -288,32 +316,41 @@ const styles = {
     whiteSpace: "pre-wrap",
     color: "#1a1a1a",
   },
-  progressWrap: {
-    alignSelf: "flex-start",
-    width: "100%",
-    padding: "6px 0",
+  statusBubble: {
+    backgroundColor: "#fff",
+    border: "1px solid #e4e4e4",
+    borderRadius: "8px",
+    padding: "10px 14px",
+    display: "flex",
+    flexDirection: "column",
+    gap: "8px",
+    minWidth: "140px",
   },
-  progressBar: {
-    height: "4px",
-    backgroundColor: "#e8e8e8",
+  statusTop: {
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+  },
+  statusText: {
+    fontSize: "13px",
+    color: "#64748b",
+    marginLeft: "2px",
+  },
+  statusBar: {
+    height: "3px",
+    backgroundColor: "#e2e8f0",
     borderRadius: "2px",
     overflow: "hidden",
-    marginBottom: "6px",
   },
-  progressFill: {
+  statusFill: {
     height: "100%",
     backgroundColor: "#4a90e2",
     borderRadius: "2px",
-    transition: "width 0.3s ease",
+    transition: "width 0.4s ease",
   },
-  progressLabel: {
-    fontSize: "12px",
-    color: "#666",
-  },
-  thinkingDots: {
-    display: "flex",
-    gap: "5px",
-    padding: "6px 0",
+  statusStep: {
+    fontSize: "11px",
+    color: "#94a3b8",
   },
   inputRow: {
     display: "flex",
