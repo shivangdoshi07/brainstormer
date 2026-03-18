@@ -190,13 +190,19 @@ const SYSTEM_PROMPTS = {
   fast: `You are a fast, lightweight AI assistant for the Brainstormer whiteboarding app. Your job is to classify the user's request to determine the appropriate action type. Use the classify_intent function to return your classification. Set type to "think" for diagram-related requests, "multimodal" only if the user explicitly mentions analyzing an image or diagram, and "chat" for general conversation.`,
   think: `You are an AI assistant helping users design diagrams on a collaborative whiteboard. Given the current board state and user request, add the appropriate shapes and connections.
 
-Use the add_diagram_elements function to return your response. Use Excalidraw element skeleton format:
-- Shapes: { "type": "rectangle", "id": "user-box", "x": 100, "y": 100, "width": 140, "height": 60, "label": { "text": "User" } }
+Use the add_diagram_elements function. Use Excalidraw element skeleton format:
+- Shapes: { "type": "rectangle", "id": "user-box", "x": 100, "y": 150, "width": 140, "height": 60, "label": { "text": "User" } }
 - Arrows: { "type": "arrow", "id": "arrow-1", "x": 0, "y": 0, "start": { "id": "user-box" }, "end": { "id": "server-box" } }
-- Use descriptive IDs (e.g. "user-box", "load-balancer", "db-1"). Never reuse IDs that exist on the board.
-- Space shapes 200-250px apart horizontally. Start at x=100, y=150 unless the board already has elements.
-- For arrows, x/y can be 0 — the positions are computed automatically from the bound elements.
-- Only add elements relevant to the current step. If no diagram changes are needed, return an empty elements array.`,
+
+Layout rules (CRITICAL — violations cause overlapping elements):
+- Use descriptive IDs (e.g. "user-box", "load-balancer", "db-1"). Never reuse an ID already on the board.
+- Default shape size: width=140, height=60. Place shapes at y=150.
+- Space shapes 240px apart horizontally: x=100, 340, 580, 820, …
+- If the board already has elements, read their positions from the board summary and place NEW elements to the RIGHT of the rightmost existing shape (rightmost x + width + 240).
+- Never place two shapes at the same x,y.
+- For arrows: set x=0, y=0 — positions are auto-computed from the bound element IDs.
+- For arrows referencing existing board elements, use their exact IDs from the board summary.
+- Only add elements for the current step. Return an empty array if no diagram changes are needed.`,
   multimodal: `You are a multimodal AI assistant for a collaborative whiteboard. You receive a board summary and optionally a diagram image. Use the add_diagram_elements function to respond using Excalidraw element skeleton format: shapes use { type, id, x, y, width, height, label: { text } }, arrows use { type, id, x, y, start: { id }, end: { id } }. If the user wants analysis only, return an empty elements array.`,
   plan: `You are a planning agent. Given a high-level system design request, break it down into short, actionable steps. Use the create_plan function to return your plan. Each step should describe a single component or connection to draw (e.g., "Create a user box", "Add load balancer"). Do NOT repeat the user's prompt as a step. If you cannot break down the task, return a single generic step.`
 };
@@ -568,14 +574,20 @@ function extractElements(raw) {
   return { reply: parsed.reply || '', elements: parsed.elements || [] };
 }
 
-// Build the context string sent to the diagram model
+// Build the context string sent to the diagram model.
+// Board summary comes first and is called out clearly so the LLM reads it
+// before deciding where to place elements.
 function buildDiagramContext({ message, summary, chatHistory, stepDesc }) {
   const historyText = tailChat(chatHistory || [])
     .map(h => `${h.sender}: ${enforceMessageSize(h.text)}`)
     .join('\n');
-  const boardCtx = summary ? `\nCurrent board: ${summary}` : '';
-  const step = stepDesc ? `\nCurrent step: ${stepDesc}` : '';
-  return `${enforceMessageSize(message)}${boardCtx}${step}\nRecent chat:\n${historyText}`;
+  const boardCtx = summary
+    ? `\nEXISTING BOARD ELEMENTS (use their IDs for arrow bindings and read their x positions to avoid overlaps):\n${summary}`
+    : '\nBoard is empty — start shapes at x=100, y=150.';
+  const step = stepDesc ? `\nCURRENT STEP: ${stepDesc}` : '';
+  const userReq = `\nUSER REQUEST: ${enforceMessageSize(message)}`;
+  const history = historyText ? `\nRecent chat:\n${historyText}` : '';
+  return `${boardCtx}${step}${userReq}${history}`;
 }
 
 // ─── Socket.io connection handler ───────────────────────────────────────────
@@ -663,10 +675,13 @@ io.on("connection", (socket) => {
           // Track new IDs for subsequent steps
           stepElements.forEach(el => { if (el.id) drawnElementIds.add(el.id); });
 
-          // Update running summary for next step's context
+          // Update running summary for next step's context — include positions
+          // so the LLM knows where to place subsequent elements without overlapping.
           if (stepElements.length > 0) {
-            accumulatedSummary = (accumulatedSummary ? accumulatedSummary + '; ' : '')
-              + stepElements.map(el => `[${el.id || '?'}] ${el.type} label='${el.label?.text || ''}'`).join('; ');
+            const newEntries = stepElements
+              .filter(el => el.type !== 'arrow')
+              .map(el => `[${el.id || '?'}] ${el.type} at (${el.x ?? 0},${el.y ?? 0}) size ${el.width || 140}x${el.height || 60} label='${el.label?.text || ''}'`);
+            accumulatedSummary = [accumulatedSummary, ...newEntries].filter(Boolean).join('; ');
           }
 
           socket.emit("reply", {
